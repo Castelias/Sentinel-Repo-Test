@@ -1,0 +1,107 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "String"
+        }
+    },
+    "resources": [
+        {
+            "id": "[concat(resourceId('Microsoft.OperationalInsights/workspaces/providers', parameters('workspace'), 'Microsoft.SecurityInsights'),'/alertRules/c01c6b88-6323-4a71-b981-4bc0ddca88bf')]",
+            "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/c01c6b88-6323-4a71-b981-4bc0ddca88bf')]",
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "kind": "Scheduled",
+            "apiVersion": "2023-12-01-preview",
+            "properties": {
+                "displayName": "SAP - Multiple Password Changes",
+                "description": "Identifies multiple password changes at different levels:\n1. Users across systems\n2. Per user performing the password change\n3. Per user who's password is being changed\n\nSource Action: Change user password",
+                "severity": "Low",
+                "enabled": true,
+                "query": "// Multiple Password Changes by User\n// !!!IMPORTANT!!!\n// please make sure \"Lookup data from the last\" parameter is greater than a full user master data update cycle\n// this is critical so we can infer the changed user AD account ID\n// actual lookback period is maintained by the TimeAgo parameter\nlet TimeAgo= 3h;\nlet SelectedSystemRoles =  dynamic([\"Production\"]); //can also do// let SelectedSystemRoles =  dynamic([\"Production\", \"UAT\"]); dynamic([\"All System Roles\"])\nlet SelectedSystems = SAPSystems(SelectedSystemRoles=SelectedSystemRoles) | project SystemID= SearchKey;\n// here you can exclude system users which are OK to perform multiple password changes\n// by adding those users in the SAP_User_Config watchlist with a tag of 'UpdateMultiPassOK'\nlet excludeUsersTags= dynamic(['UpdateMultiPassOK']);\nlet excludedUsers= _GetWatchlist('SAP_User_Config')| where Tags has_any (excludeUsersTags)| summarize by User2Exclude=SAPUser;\nlet PasswordChanges = materialize(SAPAuditLog\n| where TimeGenerated > ago(1d)\n| where ingestion_time() > ago(TimeAgo)\n| where MessageID == \"BU2\" // Audit Log Classes - Password Changed\n| join kind= inner  SelectedSystems on SystemID\n| join kind=leftantisemi excludedUsers on $left.User == $right.User2Exclude\n| extend UserReset= Variable2\n| extend Email= iff(isempty(Email), User, Email)\n| extend Host= iff(isempty(Host), TerminalIPv6, Host)\n| summarize Count= count(), Email =any(Email), Host=any(Host), StartTime = min(TimeGenerated), EndTime = max(TimeGenerated)  by User, UserReset, TerminalIPv6, ClientID, SystemID) ;\nlet PerUserSysClient = 3; // Systems & Clients per User\nlet TPerUserSysClient= PasswordChanges\n| extend DetailsBy = pack(\"SystemID\", SystemID, \"ClientID\", ClientID, 'UserChanging', User, 'Email', Email)\n| summarize CountPerUserSysClient = dcount(strcat(SystemID, ClientID)), User= any(User), StartTime = min(StartTime), EndTime = max(EndTime), Details = make_set(DetailsBy, 10)\nby UserReset\n| where  CountPerUserSysClient>= PerUserSysClient\n| where isnotempty(UserReset)\n| extend AlertDescription= strcat('User\\'s ',UserReset, ' password was reset across ', CountPerUserSysClient, ' systems '), Source= 'PerUserSysClient';\nlet PerUserChanged = 3;  // password changes across all systems and scenarios\nlet TPerUserChanged = PasswordChanges\n| extend DetailsBy = pack(\"SystemID\", SystemID, \"ClientID\", ClientID, 'UserChanging', User, 'Email', Email)\n| summarize CountPerUserChanged = sum(Count), User= any(User), StartTime = min(StartTime), EndTime = max(EndTime) , Details = make_set(DetailsBy, 10)\nby UserReset\n| where  CountPerUserChanged >= PerUserChanged\n| extend AlertDescription= strcat('User\\'s ',UserReset, ' password was reset ', CountPerUserChanged, ' times', ' by user ', User), Source= 'PerUserChanged';\nlet PerUserChanging = 3; // user changing across all systems\nlet TPerUserChanging = PasswordChanges\n| extend DetailsBy = pack(\"SystemID\", SystemID, \"ClientID\", ClientID, 'UserReset', UserReset)\n| summarize CountPerUserChanging = sum(Count), StartTime = min(StartTime), EndTime = max(EndTime), Details = make_set(DetailsBy, 10), ResetUsers= make_set(UserReset, 10)\n, Email= anyif(Email, isnotempty(Email)), TerminalIPv6= anyif(TerminalIPv6, isnotempty(TerminalIPv6))\nby User\n| where  CountPerUserChanging >= PerUserChanging\n| extend AlertDescription= strcat('User ',User, ' has changed passwords ', CountPerUserChanging, ' times to user ', tostring(ResetUsers)), Source= 'PerUserChanging';\n TPerUserSysClient | union TPerUserChanged, TPerUserChanging\n| extend Dummy=' ', PackedDetails= pack_all()\n| mv-expand Details\n| evaluate bag_unpack(Details, \"Details_\") // Unpack the details to a couple of fields\n| project\n    StartTime, EndTime, User, TerminalIPv6, AlertDescription\n    , Count= CountPerUserSysClient + CountPerUserChanged + CountPerUserChanging, PackedDetails,\n    SystemID = column_ifexists(\"Details_SystemID\", \"\"),\n    ClientID = column_ifexists(\"Details_ClientID\", \"\"),\n    UserReset= strcat(column_ifexists(\"Details_UserReset\", \"\"), column_ifexists(\"UserReset\", \"\") ),\n    Email= strcat(column_ifexists(\"Details_Email\", \"\"), column_ifexists(\"Email\", \"\") )\n | join kind= leftouter  (SAPUsersEmail | project SystemID, ClientID, UserReset= User, EmailReset= Email) on UserReset, SystemID, ClientID\n | extend EmailReset= iff(isempty(EmailReset), UserReset, EmailReset), Dummy= ''\n | project-away ClientID1, SystemID1, UserReset1\n",
+                "queryFrequency": "PT3H",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "startTimeUtc": null,
+                "tactics": [
+                    "CredentialAccess"
+                ],
+                "techniques": [],
+                "subTechniques": [],
+                "alertRuleTemplateName": "c01c6b88-6323-4a71-b981-4bc0ddca88bf",
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": false,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT5M",
+                        "matchingMethod": "AllEntities",
+                        "groupByEntities": [],
+                        "groupByAlertDetails": null,
+                        "groupByCustomDetails": null
+                    }
+                },
+                "eventGroupingSettings": {
+                    "aggregationKind": "AlertPerResult"
+                },
+                "alertDetailsOverride": {
+                    "alertDisplayNameFormat": "{{AlertDescription}}",
+                    "alertDescriptionFormat": "Identifies multiple password changes at different levels:\n1. Users across systems\n2. Per user performing the password change\n3. Per user who's password is being changed\n\nSource Action: Change user password\n\n{{PackedDetails}}\n",
+                    "alertTacticsColumnName": "Dummy",
+                    "alertSeverityColumnName": "Dummy"
+                },
+                "customDetails": {
+                    "SAP_User": "User",
+                    "UserReset": "UserReset"
+                },
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "Email"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "TerminalIPv6"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "CloudApplication",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Name",
+                                "columnName": "SystemID"
+                            },
+                            {
+                                "identifier": "AppId",
+                                "columnName": "ClientID"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "EmailReset"
+                            }
+                        ]
+                    }
+                ],
+                "sentinelEntitiesMappings": null,
+                "templateVersion": "3.0.0"
+            }
+        }
+    ]
+}
